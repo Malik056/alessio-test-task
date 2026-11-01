@@ -1,4 +1,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Only declared in the debug/profile manifests by the Flutter template;
+         release builds need it here to reach the API. -->
+    <uses-permission android:name="android.permission.INTERNET"/>
     <application
         android:label="dummy_shop"
         android:name="${applicationName}"
