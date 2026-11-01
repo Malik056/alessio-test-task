@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 
 import '../../data/models/product.dart';
@@ -7,10 +9,18 @@ import '../error_message.dart';
 enum ProductListStatus { loading, success, empty, error }
 
 class ProductListViewModel extends ChangeNotifier {
-  ProductListViewModel({required this._repository, this.pageSize = 20});
+  ProductListViewModel({
+    required this._repository,
+    this.pageSize = 20,
+    this.retryDelays = const [Duration(seconds: 2), Duration(seconds: 5)],
+  });
 
   final ProductRepository _repository;
   final int pageSize;
+
+  /// Waits before each automatic retry of a failed next page. Once these are
+  /// used up, [loadMoreError] is set and only [retryLoadMore] tries again.
+  final List<Duration> retryDelays;
 
   ProductListStatus _status = ProductListStatus.loading;
   ProductListStatus get status => _status;
@@ -28,9 +38,17 @@ class ProductListViewModel extends ChangeNotifier {
   bool _isLoadingMore = false;
   bool get isLoadingMore => _isLoadingMore;
 
-  /// Error of the last "next page" request; shown inline at the list footer.
+  /// Set once automatic retries are exhausted; the footer then shows it with
+  /// a "Try again" button.
   String? _loadMoreError;
   String? get loadMoreError => _loadMoreError;
+
+  Timer? _retryTimer;
+
+  /// A failed next page is waiting to be retried automatically.
+  bool get isRetryScheduled => _retryTimer != null;
+
+  int _consecutiveFailures = 0;
 
   /// Bumped whenever the list is reset, so an in-flight [loadMore] started
   /// before a refresh can't append stale items to the new list.
@@ -39,6 +57,7 @@ class ProductListViewModel extends ChangeNotifier {
 
   Future<void> loadInitial() async {
     _generation++;
+    _resetPagination();
     _status = ProductListStatus.loading;
     _errorMessage = null;
     _notify();
@@ -49,7 +68,6 @@ class ProductListViewModel extends ChangeNotifier {
       );
     } catch (e) {
       _products = const [];
-      _isLoadingMore = false;
       _status = ProductListStatus.error;
       _errorMessage = errorMessageFor(e);
     }
@@ -77,11 +95,26 @@ class ProductListViewModel extends ChangeNotifier {
     }
   }
 
+  /// Scroll-triggered. Never retries a failed page: that is left to the
+  /// retry timer or the "Try again" button, so scrolling while offline can't
+  /// flood the network.
   Future<void> loadMore() async {
-    if (_status != ProductListStatus.success || !_hasMore || _isLoadingMore) {
-      return;
-    }
+    if (!_canLoadMore || isRetryScheduled || _loadMoreError != null) return;
+    await _loadNextPage();
+  }
 
+  /// "Try again" button: loads immediately and restarts the retry cycle.
+  Future<void> retryLoadMore() async {
+    if (!_canLoadMore) return;
+    _cancelRetry();
+    _consecutiveFailures = 0;
+    await _loadNextPage();
+  }
+
+  bool get _canLoadMore =>
+      _status == ProductListStatus.success && _hasMore && !_isLoadingMore;
+
+  Future<void> _loadNextPage() async {
     final generation = _generation;
     _isLoadingMore = true;
     _loadMoreError = null;
@@ -103,6 +136,12 @@ class ProductListViewModel extends ChangeNotifier {
     if (page != null) {
       _products = [..._products, ...page.products];
       _hasMore = page.hasMore && page.products.isNotEmpty;
+      _consecutiveFailures = 0;
+    } else if (_consecutiveFailures < retryDelays.length) {
+      _retryTimer = Timer(retryDelays[_consecutiveFailures++], () {
+        _retryTimer = null;
+        _loadNextPage();
+      });
     } else {
       _loadMoreError = errorMessageFor(error!);
     }
@@ -110,11 +149,22 @@ class ProductListViewModel extends ChangeNotifier {
     _notify();
   }
 
-  void _applyFirstPage(ProductPage page) {
-    _products = page.products;
-    _hasMore = page.hasMore;
+  void _cancelRetry() {
+    _retryTimer?.cancel();
+    _retryTimer = null;
+  }
+
+  void _resetPagination() {
+    _cancelRetry();
+    _consecutiveFailures = 0;
     _loadMoreError = null;
     _isLoadingMore = false;
+  }
+
+  void _applyFirstPage(ProductPage page) {
+    _resetPagination();
+    _products = page.products;
+    _hasMore = page.hasMore;
     _errorMessage = null;
     _status = page.products.isEmpty
         ? ProductListStatus.empty
@@ -128,6 +178,7 @@ class ProductListViewModel extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    _cancelRetry();
     super.dispose();
   }
 }

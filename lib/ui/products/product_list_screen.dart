@@ -142,21 +142,28 @@ class _ListFooter extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final error = viewModel.loadMoreError;
+    final Widget child;
+    if (error != null) {
+      child = Column(
+        children: [
+          Text(error, textAlign: TextAlign.center),
+          TextButton(
+            onPressed: viewModel.retryLoadMore,
+            child: const Text('Try again'),
+          ),
+        ],
+      );
+    } else if (viewModel.isRetryScheduled) {
+      child = Text(
+        'Connection problem. Retrying…',
+        style: Theme.of(context).textTheme.bodySmall,
+      );
+    } else {
+      child = const CircularProgressIndicator();
+    }
     return Padding(
       padding: const EdgeInsets.all(16),
-      child: Center(
-        child: error == null
-            ? const CircularProgressIndicator()
-            : Column(
-                children: [
-                  Text(error, textAlign: TextAlign.center),
-                  TextButton(
-                    onPressed: viewModel.loadMore,
-                    child: const Text('Try again'),
-                  ),
-                ],
-              ),
-      ),
+      child: Center(child: child),
     );
   }
 }

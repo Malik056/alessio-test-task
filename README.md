@@ -9,7 +9,7 @@ Test user: `emilys` / `emilyspass`
 flutter pub get
 flutter run
 
-flutter test                      # 66 unit + widget tests
+flutter test                      # 75 unit + widget tests
 flutter test integration_test     # end-to-end on a device/simulator, real API
 ```
 
@@ -31,7 +31,9 @@ flutter test integration_test     # end-to-end on a device/simulator, real API
   - **Logout** clears both tokens.
 - **Product list** (`GET /products?skip&limit`) with loading, error (with
   retry), empty, pull-to-refresh and infinite-scroll pagination (pages of 20,
-  next page prefetched about 400px before the end, inline retry if a page fails).
+  next page prefetched about 400px before the end). A failed page is retried
+  automatically after 2s, then 5s. After the third failure in a row the footer
+  shows the error with a **Try again** button.
 - **Product detail** with an image gallery, price/discount, rating, stock and
   description.
 
@@ -80,6 +82,7 @@ Data flows one way: **View → ViewModel → Repository → ApiClient / TokenSto
 | Status enum + fields for list state | `loading / success / empty / error` are the full-screen states. "Loading more" and "load more failed" are separate flags because they show up *on top of* a successful list, not instead of it. |
 | Failed refresh keeps the list | Losing content you can already see because a refresh failed is a poor experience. The error is shown as a snackbar instead. |
 | Generation counter in `ProductListViewModel` | If a pull-to-refresh replaces the list while a next-page request is in flight, the stale page is dropped instead of being appended to the fresh list (tested). |
+| Next-page retry: backoff, then a button | Scrolling never retries a failed page. Otherwise, offline, every scroll event at the bottom would send a request that fails in milliseconds (tens per second). Instead the view model retries on a timer (2s, then 5s), then stops and hands control to the user with **Try again**, which loads immediately and restarts the cycle. A successful refresh, a reload, or leaving the screen cancels a pending retry. |
 | No view model for the detail page | `/products` already returns every field the detail page shows, so a second request would cost a round trip and add a loading state for no benefit. If the detail page needed more data (e.g. reviews), I'd add a `ProductDetailViewModel` that calls `GET /products/{id}`. |
 | Bearer token attached to requests | `/products` is public, but `ApiClient` attaches the stored token, so authenticated endpoints such as `/auth/products` work without changes. Note that `/products` ignores the token entirely (even an expired or invalid one returns 200), so in this app a 401 can only come from startup or from future authenticated endpoints. |
 | `SessionManager` separate from `ApiClient` | `ApiClient` only knows an `Authenticator` interface (get a token, refresh after a 401). The refresh request uses a second `ApiClient` *without* an authenticator, so a failing refresh can never trigger another refresh. |
@@ -105,11 +108,14 @@ Data flows one way: **View → ViewModel → Repository → ApiClient / TokenSto
   correct pagination params).
 - `test/ui/*_view_model_test.dart`: the core of the suite. Covers every state
   transition: validation, loading flags, success/empty/error, pagination
-  append and end-of-list, de-duplicating concurrent `loadMore` calls, inline
-  page errors and retry, refresh success/failure, the refresh-vs-pagination race,
-  and no notifications after dispose.
+  append and end-of-list, de-duplicating concurrent `loadMore` calls, refresh
+  success/failure, the refresh-vs-pagination race, and no notifications after
+  dispose. Failed-page retries use `fake_async`: no requests from scrolling
+  while a retry is pending, exact retry timing, giving up after three failures,
+  **Try again** restarting the cycle, and refresh/dispose cancelling the timer.
 - `test/ui/product_list_screen_test.dart`: widget tests for the loading, empty
-  and error→retry states.
+  and error→retry states, plus the footer going from "Retrying…" to
+  **Try again** to the loaded page.
 - `test/ui/app_startup_test.dart`: startup routes to the list or to login.
 - `integration_test/app_flow_test.dart`: runs the real app against the live API.
   It covers wrong password → error, login → token stored in the Keychain,

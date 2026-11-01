@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:dummy_shop/core/api_exception.dart';
 import 'package:dummy_shop/data/models/product.dart';
 import 'package:dummy_shop/ui/products/product_list_view_model.dart';
+import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
 
@@ -119,23 +120,6 @@ void main() {
       expect(ids(), [1, 2, 3, 4]);
     });
 
-    test('keeps loaded items and exposes an inline error on failure', () async {
-      stubPage(2, () => throw const ApiException('Timeout'));
-
-      await viewModel.loadMore();
-
-      expect(viewModel.status, ProductListStatus.success);
-      expect(ids(), [1, 2]);
-      expect(viewModel.loadMoreError, 'Timeout');
-      expect(viewModel.isLoadingMore, isFalse);
-
-      stubPage(2, () => page(skip: 2, count: 2, total: 5));
-      await viewModel.loadMore();
-
-      expect(viewModel.loadMoreError, isNull);
-      expect(ids(), [1, 2, 3, 4]);
-    });
-
     test('does nothing when the list is not in success state', () async {
       stubPage(0, () => throw const ApiException('x'));
       await viewModel.loadInitial();
@@ -149,6 +133,170 @@ void main() {
           limit: any(named: 'limit'),
         ),
       );
+    });
+  });
+
+  group('failed next page', () {
+    // Page 1 (ids 1-2) is loaded; page 2 is at skip 2. Default retry delays
+    // are 2s then 5s, so 3 consecutive failures exhaust automatic retries.
+    var calls = 0;
+
+    setUp(() async {
+      calls = 0;
+      stubPage(0, () => page(skip: 0, count: 2, total: 5));
+      await viewModel.loadInitial();
+    });
+
+    void failNextPage() => stubPage(2, () {
+      calls++;
+      throw const ApiException('Timeout');
+    });
+
+    void succeedNextPage() => stubPage(2, () {
+      calls++;
+      return page(skip: 2, count: 2, total: 5);
+    });
+
+    test('schedules an automatic retry instead of showing an error', () {
+      fakeAsync((async) {
+        failNextPage();
+        viewModel.loadMore();
+        async.flushMicrotasks();
+
+        expect(viewModel.isRetryScheduled, isTrue);
+        expect(viewModel.loadMoreError, isNull);
+        expect(viewModel.isLoadingMore, isFalse);
+        expect(ids(), [1, 2]);
+      });
+    });
+
+    test('scrolling while a retry is pending sends no requests', () {
+      fakeAsync((async) {
+        failNextPage();
+        viewModel.loadMore();
+        async.flushMicrotasks();
+
+        for (var i = 0; i < 10; i++) {
+          viewModel.loadMore();
+        }
+        async.flushMicrotasks();
+
+        expect(calls, 1);
+      });
+    });
+
+    test('retries after the delay and appends the page', () {
+      fakeAsync((async) {
+        failNextPage();
+        viewModel.loadMore();
+        async.flushMicrotasks();
+
+        succeedNextPage();
+        async.elapse(const Duration(seconds: 2));
+
+        expect(ids(), [1, 2, 3, 4]);
+        expect(viewModel.isRetryScheduled, isFalse);
+        expect(calls, 2);
+      });
+    });
+
+    test('waits longer before each retry', () {
+      fakeAsync((async) {
+        failNextPage();
+        viewModel.loadMore();
+        async.flushMicrotasks();
+
+        async.elapse(const Duration(milliseconds: 1999));
+        expect(calls, 1);
+        async.elapse(const Duration(milliseconds: 1));
+        expect(calls, 2);
+
+        async.elapse(const Duration(milliseconds: 4999));
+        expect(calls, 2);
+        async.elapse(const Duration(milliseconds: 1));
+        expect(calls, 3);
+      });
+    });
+
+    test('shows Try again after all automatic retries fail', () {
+      fakeAsync((async) {
+        failNextPage();
+        viewModel.loadMore();
+        async.elapse(const Duration(seconds: 7));
+
+        expect(calls, 3);
+        expect(viewModel.loadMoreError, 'Timeout');
+        expect(viewModel.isRetryScheduled, isFalse);
+        expect(ids(), [1, 2]);
+
+        // Neither scrolling nor time passing retries any more.
+        for (var i = 0; i < 10; i++) {
+          viewModel.loadMore();
+        }
+        async.elapse(const Duration(minutes: 1));
+        expect(calls, 3);
+      });
+    });
+
+    test('Try again loads immediately and restarts the retry cycle', () {
+      fakeAsync((async) {
+        failNextPage();
+        viewModel.loadMore();
+        async.elapse(const Duration(seconds: 7));
+
+        viewModel.retryLoadMore();
+        async.flushMicrotasks();
+        expect(calls, 4);
+        expect(viewModel.loadMoreError, isNull);
+        expect(viewModel.isRetryScheduled, isTrue);
+
+        succeedNextPage();
+        async.elapse(const Duration(seconds: 2));
+        expect(ids(), [1, 2, 3, 4]);
+      });
+    });
+
+    test('Try again during a pending retry cancels the timer', () {
+      fakeAsync((async) {
+        failNextPage();
+        viewModel.loadMore();
+        async.flushMicrotasks();
+
+        succeedNextPage();
+        viewModel.retryLoadMore();
+        async.elapse(const Duration(seconds: 10));
+
+        expect(calls, 2);
+        expect(ids(), [1, 2, 3, 4]);
+      });
+    });
+
+    test('a successful refresh cancels a pending retry', () {
+      fakeAsync((async) {
+        failNextPage();
+        viewModel.loadMore();
+        async.flushMicrotasks();
+
+        viewModel.refresh();
+        async.flushMicrotasks();
+        expect(viewModel.isRetryScheduled, isFalse);
+
+        async.elapse(const Duration(seconds: 10));
+        expect(calls, 1);
+      });
+    });
+
+    test('dispose cancels a pending retry', () {
+      fakeAsync((async) {
+        failNextPage();
+        viewModel.loadMore();
+        async.flushMicrotasks();
+
+        viewModel.dispose();
+        async.elapse(const Duration(seconds: 10));
+
+        expect(calls, 1);
+      });
     });
   });
 
