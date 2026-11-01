@@ -9,7 +9,7 @@ Test user: `emilys` / `emilyspass`
 flutter pub get
 flutter run
 
-flutter test                      # 75 unit + widget tests
+flutter test                      # 84 unit + widget tests
 flutter test integration_test     # end-to-end on a device/simulator, real API
 ```
 
@@ -28,7 +28,9 @@ flutter test integration_test     # end-to-end on a device/simulator, real API
     with a "session expired" error.
     (`/products` ignores the token, so in this app this only matters for
     authenticated endpoints added later.)
-  - **Logout** clears both tokens.
+  - **Logout** clears both tokens. Session changes (login, logout, refresh)
+    run one at a time, so a logout during a refresh can't be undone by the
+    refresh's late response.
 - **Product list** (`GET /products?skip&limit`) with loading, error (with
   retry), empty, pull-to-refresh and infinite-scroll pagination (pages of 20,
   next page prefetched about 400px before the end). A failed page is retried
@@ -77,7 +79,7 @@ Data flows one way: **View → ViewModel → Repository → ApiClient / TokenSto
 |---|---|
 | `provider` + `ChangeNotifier` | This is the MVVM approach Flutter's own architecture guide recommends. It has minimal boilerplate for a 3-screen app and no code generation. Riverpod or Bloc would also work, but they would add ceremony without adding value at this size. |
 | `http` instead of `dio` | Two endpoints don't need interceptors. `http`'s `MockClient` makes the networking layer easy to test. |
-| `TokenStorage` interface | Keeps platform channels out of the tests (`InMemoryTokenStorage`). The secure implementation caches the token in memory so we don't hit the Keychain on every request. |
+| `TokenStorage` interface | Keeps platform channels out of the tests (`InMemoryTokenStorage`). The secure implementation stores both tokens as one JSON value under a single key, so a write is all-or-nothing and storage never holds half a session. It caches the tokens in memory so we don't hit the Keychain on every request. |
 | Hand-written `fromJson` | Three small models. `json_serializable`/`freezed` would add a build step for little gain. |
 | Status enum + fields for list state | `loading / success / empty / error` are the full-screen states. "Loading more" and "load more failed" are separate flags because they show up *on top of* a successful list, not instead of it. |
 | Failed refresh keeps the list | Losing content you can already see because a refresh failed is a poor experience. The error is shown as a snackbar instead. |
@@ -86,6 +88,7 @@ Data flows one way: **View → ViewModel → Repository → ApiClient / TokenSto
 | No view model for the detail page | `/products` already returns every field the detail page shows, so a second request would cost a round trip and add a loading state for no benefit. If the detail page needed more data (e.g. reviews), I'd add a `ProductDetailViewModel` that calls `GET /products/{id}`. |
 | Bearer token attached to requests | `/products` is public, but `ApiClient` attaches the stored token, so authenticated endpoints such as `/auth/products` work without changes. Note that `/products` ignores the token entirely (even an expired or invalid one returns 200), so in this app a 401 can only come from startup or from future authenticated endpoints. |
 | `SessionManager` separate from `ApiClient` | `ApiClient` only knows an `Authenticator` interface (get a token, refresh after a 401). The refresh request uses a second `ApiClient` *without* an authenticator, so a failing refresh can never trigger another refresh. |
+| Session changes run one at a time | Login, logout and refresh go through one queue in `SessionManager`. Without it, a logout during a refresh cleared storage, and then the refresh response arrived and saved a fresh token pair, so the next start logged the user back in. Now the logout runs after the refresh and storage ends up empty. A refresh queued behind a logout finds no session and makes no request. The logout button doesn't wait for the queue; it navigates immediately, and the queue still applies the logout before any later login. This is the same idea as OkHttp's synchronized `Authenticator` and dio's `QueuedInterceptor`. |
 | Single shared refresh request | Concurrent callers share one in-flight refresh, and a 401 for a token that has already been replaced reuses the current token. Many backends rotate refresh tokens and invalidate the old one on use, and some revoke the whole session when an old one is reused. Against those, two parallel refreshes would log the user out by mistake. dummyjson does *not* invalidate old refresh tokens (see below), so here this only avoids redundant calls, but the client stays correct against a stricter server. |
 | Offline at startup keeps the session | A failed refresh only ends the session when the server *rejects* it (401/403). On a network error, timeout or 5xx the tokens are kept and the user continues, because the products are public. The refresh is retried on the next launch. |
 | 30-second expiry leeway | Tokens about to expire are treated as expired, which absorbs clock skew and request latency. |
@@ -103,6 +106,12 @@ Data flows one way: **View → ViewModel → Repository → ApiClient / TokenSto
   rejected, offline, opaque token). Also covers 401 refreshes: one shared call
   for concurrent 401s, reusing an already-refreshed token, rejection clears the
   tokens, network/5xx errors keep the session.
+  Login/logout during an in-flight refresh: logout wins, logout waits for the
+  refresh, a new login isn't overwritten, a refresh queued behind a logout
+  makes no request. These tests fail against the previous implementation.
+- `test/data/token_storage_test.dart`: both tokens stored under one key,
+  read back by a new instance, clear, and unreadable data treated as no
+  session.
 - `test/data/`: model parsing (including a missing `brand`), `hasMore` math,
   repositories (tokens saved only on successful login, logout clears them,
   correct pagination params).

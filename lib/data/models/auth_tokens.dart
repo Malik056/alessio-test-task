@@ -6,6 +6,11 @@ class AuthTokens {
     refreshToken: json['refreshToken'] as String,
   );
 
+  Map<String, dynamic> toJson() => {
+    'accessToken': accessToken,
+    'refreshToken': refreshToken,
+  };
+
   final String accessToken;
   final String refreshToken;
 }

@@ -23,9 +23,15 @@ class SessionManager implements Authenticator {
 
   Future<String?>? _refreshing;
 
-  Future<void> start(AuthTokens tokens) => _storage.save(tokens);
+  /// Tail of the queue that runs session changes one at a time.
+  Future<void> _queue = Future.value();
 
-  Future<void> end() => _storage.clear();
+  Future<void> start(AuthTokens tokens) =>
+      _serialized(() => _storage.save(tokens));
+
+  /// Logout. Queued behind an in-flight refresh, so the refresh can't write
+  /// its new tokens back after the session was cleared.
+  Future<void> end() => _serialized(_storage.clear);
 
   /// Startup check. Returns whether the user can continue without logging in.
   ///
@@ -38,7 +44,7 @@ class SessionManager implements Authenticator {
     if (!_isExpired(tokens.accessToken)) return true;
 
     if (_isExpired(tokens.refreshToken)) {
-      await _storage.clear();
+      await _serialized(_storage.clear);
       return false;
     }
     try {
@@ -52,24 +58,28 @@ class SessionManager implements Authenticator {
   Future<String?> accessToken() async => (await _storage.read())?.accessToken;
 
   @override
-  Future<String?> refreshAccessToken({required String failedToken}) async {
-    final current = await _storage.read();
-    if (current == null) return null;
-    // Another request already refreshed while this one was in flight.
-    if (current.accessToken != failedToken) return current.accessToken;
-    return _refreshOnce();
-  }
+  Future<String?> refreshAccessToken({required String failedToken}) =>
+      _refreshOnce(failedToken: failedToken);
 
   /// Concurrent callers share one network call. Servers that invalidate a
   /// refresh token on use would otherwise reject the second, parallel refresh.
-  Future<String?> _refreshOnce() =>
-      _refreshing ??= _refresh().whenComplete(() => _refreshing = null);
+  Future<String?> _refreshOnce({String? failedToken}) =>
+      _refreshing ??= _serialized(() => _refresh(failedToken))
+          .whenComplete(() => _refreshing = null);
 
   /// Returns `null` and ends the session if the server rejects the refresh
   /// token; the caller then surfaces an [ApiException] for the request.
-  Future<String?> _refresh() async {
+  ///
+  /// Runs inside the queue, so the stored tokens it reads are current: a
+  /// logout or login queued earlier has already been applied.
+  Future<String?> _refresh(String? failedToken) async {
     final tokens = await _storage.read();
+    // Logged out before this refresh got its turn.
     if (tokens == null) return null;
+    // Another refresh already replaced the token this request failed with.
+    if (failedToken != null && tokens.accessToken != failedToken) {
+      return tokens.accessToken;
+    }
     try {
       final fresh = AuthTokens.fromJson(
         await _authApi.post(
@@ -86,6 +96,14 @@ class SessionManager implements Authenticator {
       await _storage.clear();
       return null;
     }
+  }
+
+  /// Runs [action] after every previously queued action has finished, whether
+  /// it succeeded or failed.
+  Future<T> _serialized<T>(Future<T> Function() action) {
+    final result = _queue.then((_) => action());
+    _queue = result.then((_) {}, onError: (_) {});
+    return result;
   }
 
   bool _isExpired(String token) {

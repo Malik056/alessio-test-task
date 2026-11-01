@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
@@ -31,9 +33,10 @@ class ProductListScreen extends StatelessWidget {
 class ProductListView extends StatelessWidget {
   const ProductListView({super.key});
 
-  Future<void> _logout(BuildContext context) async {
-    await context.read<AuthRepository>().logout();
-    if (!context.mounted) return;
+  void _logout(BuildContext context) {
+    // Not awaited: logout may be queued behind an in-flight token refresh.
+    // The session queue still applies it before any later login.
+    unawaited(context.read<AuthRepository>().logout());
     Navigator.of(context).pushAndRemoveUntil(LoginScreen.route(), (_) => false);
   }
 

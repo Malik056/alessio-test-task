@@ -1,5 +1,7 @@
 import 'dart:convert';
 
+import 'package:dummy_shop/data/models/auth_tokens.dart';
+import 'package:dummy_shop/data/services/token_storage.dart';
 import 'package:dummy_shop/main.dart' as app;
 import 'package:dummy_shop/ui/login/login_screen.dart';
 import 'package:dummy_shop/ui/product_detail/product_detail_screen.dart';
@@ -16,6 +18,9 @@ import 'package:provider/provider.dart';
 /// Run with: flutter test integration_test
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
+
+  // A fresh instance each time, so nothing is served from the in-memory cache.
+  Future<AuthTokens?> storedTokens() => SecureTokenStorage().read();
 
   Future<void> pumpUntil(WidgetTester tester, Finder finder) async {
     for (var i = 0; i < 100 && finder.evaluate().isEmpty; i++) {
@@ -58,10 +63,7 @@ void main() {
         .pumpAndSettle(); // editing clears the error and moves the button
     await tester.tap(find.byKey(const Key('login_submit')));
     await pumpUntil(tester, find.byType(ProductTile));
-    expect(
-      await const FlutterSecureStorage().read(key: 'access_token'),
-      isNotEmpty,
-    );
+    expect((await storedTokens())?.accessToken, isNotEmpty);
 
     // Scrolling to the end of the first page loads the next one.
     final viewModel = Provider.of<ProductListViewModel>(
@@ -94,15 +96,14 @@ void main() {
     await tester.tap(find.byTooltip('Log out'));
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('login_submit')), findsOneWidget);
-    expect(
-      await const FlutterSecureStorage().read(key: 'access_token'),
-      isNull,
-    );
+    // Logout clears storage in the background; give it a moment.
+    for (var i = 0; i < 20 && await storedTokens() != null; i++) {
+      await tester.pump(const Duration(milliseconds: 100));
+    }
+    expect(await storedTokens(), isNull);
   });
 
   group('startup with a stored session', () {
-    const storage = FlutterSecureStorage();
-
     // A structurally valid JWT that expired an hour ago.
     String expiredJwt() {
       String part(Object json) =>
@@ -122,28 +123,30 @@ void main() {
 
     testWidgets('expired access token is refreshed silently', (tester) async {
       final expired = expiredJwt();
-      await storage.write(key: 'access_token', value: expired);
-      await storage.write(
-        key: 'refresh_token',
-        value: await realRefreshToken(),
+      await SecureTokenStorage().save(
+        AuthTokens(
+          accessToken: expired,
+          refreshToken: await realRefreshToken(),
+        ),
       );
 
       app.main();
       await pumpUntil(tester, find.byType(ProductTile));
 
-      final access = await storage.read(key: 'access_token');
+      final access = (await storedTokens())?.accessToken;
       expect(access, isNot(expired));
       expect(access, isNotEmpty);
     });
 
     testWidgets('rejected refresh token lands on login', (tester) async {
-      await storage.write(key: 'access_token', value: expiredJwt());
-      await storage.write(key: 'refresh_token', value: 'revoked');
+      await SecureTokenStorage().save(
+        AuthTokens(accessToken: expiredJwt(), refreshToken: 'revoked'),
+      );
 
       app.main();
       await pumpUntil(tester, find.byType(LoginScreen));
 
-      expect(await storage.read(key: 'access_token'), isNull);
+      expect(await storedTokens(), isNull);
     });
   });
 }

@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 import '../models/auth_tokens.dart';
@@ -11,14 +13,18 @@ abstract interface class TokenStorage {
 }
 
 /// Stores the tokens in the iOS Keychain / Android Keystore-backed storage.
+///
+/// Both tokens are one JSON value under a single key, so every write is
+/// all-or-nothing: storage never holds an access token without its refresh
+/// token, even if the app is killed mid-write.
+///
 /// Keeps an in-memory copy so we don't hit the platform channel on every
 /// request.
 class SecureTokenStorage implements TokenStorage {
   SecureTokenStorage([FlutterSecureStorage? storage])
     : _storage = storage ?? const FlutterSecureStorage();
 
-  static const _accessKey = 'access_token';
-  static const _refreshKey = 'refresh_token';
+  static const key = 'auth_tokens';
 
   final FlutterSecureStorage _storage;
   AuthTokens? _cached;
@@ -27,11 +33,7 @@ class SecureTokenStorage implements TokenStorage {
   @override
   Future<AuthTokens?> read() async {
     if (!_loaded) {
-      final access = await _storage.read(key: _accessKey);
-      final refresh = await _storage.read(key: _refreshKey);
-      _cached = access != null && refresh != null
-          ? AuthTokens(accessToken: access, refreshToken: refresh)
-          : null;
+      _cached = _decode(await _storage.read(key: key));
       _loaded = true;
     }
     return _cached;
@@ -39,17 +41,25 @@ class SecureTokenStorage implements TokenStorage {
 
   @override
   Future<void> save(AuthTokens tokens) async {
-    await _storage.write(key: _accessKey, value: tokens.accessToken);
-    await _storage.write(key: _refreshKey, value: tokens.refreshToken);
+    await _storage.write(key: key, value: jsonEncode(tokens.toJson()));
     _cached = tokens;
     _loaded = true;
   }
 
   @override
   Future<void> clear() async {
-    await _storage.delete(key: _accessKey);
-    await _storage.delete(key: _refreshKey);
+    await _storage.delete(key: key);
     _cached = null;
     _loaded = true;
+  }
+
+  /// Unreadable data is treated as "no session" rather than crashing startup.
+  static AuthTokens? _decode(String? value) {
+    if (value == null) return null;
+    try {
+      return AuthTokens.fromJson(jsonDecode(value) as Map<String, dynamic>);
+    } catch (_) {
+      return null;
+    }
   }
 }

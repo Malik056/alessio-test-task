@@ -222,4 +222,81 @@ void main() {
       expect(requests, isEmpty);
     });
   });
+
+  group('login/logout while a refresh is in flight', () {
+    late Completer<void> gate;
+
+    setUp(() {
+      storage.tokens = AuthTokens(
+        accessToken: expired,
+        refreshToken: refreshValid,
+      );
+      gate = Completer<void>();
+      respond = (_) async {
+        await gate.future;
+        return refreshed();
+      };
+    });
+
+    test(
+      'logout wins: the late refresh does not restore the session',
+      () async {
+        final refresh = session.refreshAccessToken(failedToken: expired);
+        await pumpEventQueue(); // refresh request is now on the wire
+        final logout = session.end();
+
+        gate.complete(); // refresh response arrives after the logout tap
+        await Future.wait([refresh, logout]);
+
+        expect(storage.tokens, isNull);
+        expect(await session.restore(), isFalse);
+      },
+    );
+
+    test('logout waits for the in-flight refresh before clearing', () async {
+      session.refreshAccessToken(failedToken: expired);
+      await pumpEventQueue();
+      var loggedOut = false;
+      session.end().then((_) => loggedOut = true);
+
+      await pumpEventQueue();
+      expect(loggedOut, isFalse);
+
+      gate.complete();
+      await pumpEventQueue();
+      expect(loggedOut, isTrue);
+    });
+
+    test('a new login during a refresh is not overwritten', () async {
+      final login = AuthTokens(accessToken: valid, refreshToken: refreshValid);
+      final refresh = session.refreshAccessToken(failedToken: expired);
+      await pumpEventQueue();
+      final start = session.start(login);
+
+      gate.complete();
+      await Future.wait([refresh, start]);
+
+      expect(storage.tokens, same(login));
+    });
+
+    test('a refresh queued behind a logout makes no network call', () async {
+      gate.complete();
+      final logout = session.end();
+      final refresh = session.refreshAccessToken(failedToken: expired);
+
+      await logout;
+      expect(await refresh, isNull);
+      expect(requests, isEmpty);
+    });
+
+    test('a failed refresh does not block later session changes', () async {
+      respond = (_) => throw http.ClientException('offline');
+      final refresh = session.refreshAccessToken(failedToken: expired);
+      await expectLater(refresh, throwsA(isA<Exception>()));
+
+      await session.end();
+
+      expect(storage.tokens, isNull);
+    });
+  });
 }
